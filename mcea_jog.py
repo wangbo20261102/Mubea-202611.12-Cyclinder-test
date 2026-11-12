@@ -12,7 +12,7 @@ from mcea_direction_test import Device, bounds, move, validate
 
 BAUD = 115200
 DEVICE_ID = 1
-STEPS = {'0.10': 10, '0.50': 50, '1.00': 100, '2.00': 200}
+STEPS = {'0.10': 10, '0.50': 50, '1.00': 100, '2.00': 200, '4.00': 400}
 
 
 def jog_target(state, delta):
