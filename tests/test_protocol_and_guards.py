@@ -1,10 +1,11 @@
 """Offline tests only: no real serial connections or motion."""
+import argparse
 import struct
 import unittest
 
 from mcea_read import crc16
 from mcea_home import HOME_PREPARE, HOME_TRIGGER, HomeDevice, preconditions
-from mcea_direction_test import Device, bounds, plan, validate
+from mcea_direction_test import Device, bounds, move, parse_target_mm, plan, validate
 
 
 class FakeSerial:
@@ -121,6 +122,37 @@ class GuardTests(unittest.TestCase):
                              ('control', 0x8020), ('control', 0x0220),
                              ('control', 0x28), ('status', 0x4560), ('status', 0x4060)):
             self.assertTrue(validate(dict(self.state, **{field: value}), 1), (field, value))
+
+    def test_absolute_target_conversion_and_precision(self):
+        self.assertEqual(parse_target_mm('25.01'), 2501)
+        self.assertEqual(parse_target_mm('25.000'), 2500)
+        for value in ('-1', '51', '25.001', 'NaN', 'Infinity', 'abc'):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                parse_target_mm(value)
+
+    def test_absolute_move_rechecks_live_stroke_before_write(self):
+        port = device()
+        port.snapshot = lambda: dict(self.state, limit=3400)
+        report = {'segments': [], 'write_attempted': False}
+        with self.assertRaises(RuntimeError):
+            move(port, 3500, 2500, 200, 4800, report)
+        self.assertFalse(report['write_attempted'])
+        self.assertEqual(port.serial.sent, [])
+
+    def test_absolute_move_waits_for_arrival_feedback(self):
+        port = device()
+        port.snapshot = lambda: self.state
+        values = {0x160F: 0, 0x1611: 0x4460, 0x160C: 2501}
+        port.value = values.__getitem__
+        report = {'segments': [], 'write_attempted': False}
+        move(port, 2501, 2500, 200, 4800, report)
+        self.assertEqual(len(port.serial.sent), 2)
+        self.assertEqual([struct.unpack('>6H', frame[7:-2]) for frame in port.serial.sent],
+                         [(2501, 0, 100, 1, 0, 0x20), (2501, 0, 100, 1, 0, 0x21)])
+        segment = report['segments'][0]
+        self.assertTrue(segment['complete'])
+        self.assertEqual(len(segment['feedback']), 3)
+        self.assertEqual(segment['final_mm'], 25.01)
 
     def test_homing_guards(self):
         state = dict(self.state, homing=0, status=0x4420)

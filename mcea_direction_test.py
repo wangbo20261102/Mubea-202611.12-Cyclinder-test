@@ -4,6 +4,7 @@ import json
 import struct
 import time
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from mcea_read import Reader, crc16
@@ -120,36 +121,67 @@ def plan(start, low, high):
     return targets
 
 
+def parse_target_mm(text):
+    try:
+        value = Decimal(text)
+    except InvalidOperation as exc:
+        raise argparse.ArgumentTypeError('目标位置必须为毫米数。') from exc
+    if not value.is_finite() or not 0 <= value <= 50:
+        raise argparse.ArgumentTypeError('目标位置必须在 0～50 mm 之间。')
+    raw = int(value * 100)
+    if value != Decimal(raw).scaleb(-2):
+        raise argparse.ArgumentTypeError('目标位置的最小单位为 0.01 mm。')
+    return raw
+
+
 def confirm(message, token):
     response = input(f'{message}\n输入 {token} 继续，其他输入退出：').strip()
     if response != token:
         raise RuntimeError('操作员取消；不继续执行下一段。')
 
 
-def move(device, target, expected_start, low, high, report):
+def check_motion_stop(stop_event):
+    if stop_event is not None and stop_event.is_set():
+        raise RuntimeError('操作员请求暂停。')
+
+
+def move(device, target, expected_start, low, high, report, *, stop_event=None):
     before = device.snapshot()
     errors = validate(before, device.id)
     if errors:
         raise RuntimeError('; '.join(errors))
     if abs(before['position'] - expected_start) > TOLERANCE_RAW:
         raise RuntimeError('等待期间位置发生变化，测试中止，请重新读取起点。')
+    live_low, live_high = bounds(before)
+    high = min(high, live_high)
+    if not max(low, live_low) <= target <= high:
+        raise RuntimeError('目标位置超出当前允许行程。')
+    if not low <= before['position'] <= high:
+        raise RuntimeError('当前位置超出本段允许范围。')
     segment = {'from_mm': before['position'] / 100, 'target_mm': target / 100,
                'feedback': [], 'complete': False}
     report['segments'].append(segment)
     values = [target, 0, SPEED_RAW, ACCEL_PERCENT, 0, 0x20]
     prefix = struct.pack('>BBHHB', device.id, 16, 0x1600, 6, 12)
     # Clear the start bit, then raise it. Both packets carry the complete slow parameters.
+    check_motion_stop(stop_event)
     report['write_attempted'] = True
     device.write_ack(prefix + struct.pack('>6H', *values))
     values[-1] = 0x21
+    check_motion_stop(stop_event)
+    report['trigger_attempted'] = True
     device.write_ack(prefix + struct.pack('>6H', *values))
     deadline = time.monotonic() + abs(target - before['position']) / SPEED_RAW + 15
     settled = 0
     last_print = 0
     while time.monotonic() < deadline:
+        check_motion_stop(stop_event)
         alarm = device.value(0x160F)
+        check_motion_stop(stop_event)
         status = device.value(0x1611)
+        check_motion_stop(stop_event)
         position = device.value(0x160C)
+        check_motion_stop(stop_event)
         segment['feedback'].append({'time': time.time(), 'position': position,
                                     'status': status, 'alarm': alarm})
         if alarm or status & (1 << 9) or not status & (1 << 10) or not status & (1 << 6):
@@ -176,7 +208,9 @@ def main():
     parser.add_argument('--baud', type=int, default=115200)
     parser.add_argument('--id', type=int, default=1)
     parser.add_argument('--check', action='store_true', help='Read position and validate only; no writes')
-    parser.add_argument('--center', action='store_true', help='Prepare at 25 mm before capturing the test start')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--target-mm', dest='target_raw', metavar='MM', type=parse_target_mm, help='Move once to an absolute position at 1 mm/s')
+    mode.add_argument('--center', action='store_true', help='Prepare at 25 mm before capturing the test start')
     args = parser.parse_args()
     if not 1 <= args.id <= 247:
         parser.error('ID must be 1..247')
@@ -196,6 +230,27 @@ def main():
         errors = validate(initial, args.id)
         if args.center and not 0 <= start <= high:
             errors.append('当前位置不适合执行向中部的准备运动。')
+        if args.target_raw is not None:
+            target = args.target_raw
+            if start != 0 and not low <= start <= high:
+                errors.append('当前位置超出允许范围，请重新检查设备状态。')
+            if not low <= target <= high:
+                errors.append(f'目标超出允许范围 {low / 100:.2f}～{high / 100:.2f} mm。')
+            if errors:
+                raise RuntimeError('\n'.join(errors))
+            report['targets_mm'] = [target / 100]
+            print(f'定位：{start / 100:.2f} → {target / 100:.2f} mm，速度 1 mm/s。')
+            if not args.check and start != target:
+                confirm('确认路径无障碍、负载固定、现场停止装置可用，并关闭其他控制软件。', 'START')
+                move(device, target, start, 0 if start == 0 else low, high, report)
+                print('定位完成，已确认到位。')
+            elif args.check:
+                print('只读检查通过。')
+            else:
+                print('当前位置已等于目标位置，无需移动。')
+            report['success'] = True
+            return 0
+
         planned_start = 2500 if args.center else start
         try:
             targets = plan(planned_start, low, high)

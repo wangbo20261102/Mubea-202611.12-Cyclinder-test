@@ -16,6 +16,19 @@
 | `docs/` | 设备资料、协议、操作、实测结果及GitHub上传说明 |
 | 根目录的 `.cmd` 文件 | Windows双击入口：读取、回零、准备并慢速测试 |
 
+## Windows 免安装点动程序
+
+在 `SW_JOB_PROGRAM` 分支下载 [MCEA-Jog.exe](dist/MCEA-Jog.exe)，在 Windows x64 上双击运行。程序已打包 Python 和界面依赖。USB 转 RS485 转接器仍需由 Windows 正常识别。
+
+在窗口中选择串口，点击 **读取状态**，确认现场条件后选择步长，再点击 **− 点动** 或 **+ 点动**。每次点击移动一步，默认步长 1.00 mm，速度 1 mm/s。
+
+如需从源码重新打包，在 Windows 项目目录完成下方的 Python 环境安装后执行：
+
+```powershell
+& ./.venv/Scripts/python.exe -m pip install pyinstaller==6.22.3
+& ./.venv/Scripts/python.exe -m PyInstaller --noconfirm --onefile --windowed --name MCEA-Jog --specpath build --workpath build/pyinstaller --distpath dist mcea_jog.py
+```
+
 ## 安装
 
 Windows PowerShell，在项目目录执行：
@@ -51,6 +64,24 @@ $env:PYTHONIOENCODING = "utf-8"
 ```
 
 `--center`路线为：原位置 → 25 → 35 → 25 → 15 → 25 mm。到达中部后重新读取当前位置作为测试起点，实际目标按该读数计算。省略`--center`时，以现位置为起点，必须有双侧各10 mm余量。程序不会因未回零而自动回零。
+
+### Windows 点动窗口
+
+双击 `电缸点动.cmd`。选择 USB 转 RS485 转接器所在的串口（本机最近一次识别为 COM7），点击 **读取状态**。关闭其他控制软件，确认现场条件后勾选窗口内的确认框。选择步长，点击 **− 点动** 或 **+ 点动**，每次移动一步。默认步长 1.00 mm，速度固定为 1 mm/s。
+
+运动期间可以点击 **软件暂停**。程序收到驱动器的暂停应答后，仍需现场确认已停止。通信中断时使用现场停止装置。恢复前重新检查设备状态。
+
+### 指定位置
+
+已回零后，可按 1 mm/s 移动到指定的绝对位置，位置单位为 mm，支持 0.01 mm 分辨率。程序读取设备行程和原点偏置，按本项目的保守范围校验目标。把 COM3 替换为实际 USB 转 RS485 端口。
+
+```powershell
+# 只读检查：以 25 mm 为目标
+& ".\.venv\Scripts\python.exe" .\mcea_direction_test.py --port COM3 --target-mm 25 --check
+
+# 现场确认后，输入 START 执行单段定位
+& ".\.venv\Scripts\python.exe" .\mcea_direction_test.py --port COM3 --target-mm 25
+```
 
 日志保存在`logs/`，默认不提交Git。不存在串口或通信失败时不自动重发运动指令。
 
